@@ -1,0 +1,118 @@
+//@version=5
+indicator("BTC Scalp Master [3m/5m/15m]", overlay=true, max_labels_count=500)
+
+// ==========================================
+// 1. CONFIGURATION
+// ==========================================
+// Trend Filter
+emaTrendLen = input.int(200, "Trend Filter (200 EMA)", group="Strategy")
+
+// Volatility Engine (The "Squeeze" Detector)
+bbLength    = input.int(20, "Bollinger Length", group="Volatility")
+bbMult      = input.float(2.0, "Bollinger Multiplier", group="Volatility")
+keltnerMult = input.float(1.5, "Keltner Channel Multiplier", group="Volatility")
+
+// Risk Management (BTC Specific)
+// On 5m chart, a 150-300 point move is a good scalp.
+takeProfitPoints = input.int(250, "Take Profit ($ Points)", tooltip="Use 200-300 for BTC 5m Scalps", group="Targets")
+stopLossPoints   = input.int(150, "Stop Loss ($ Points)", group="Targets")
+
+// ==========================================
+// 2. CALCULATIONS
+// ==========================================
+// A. Trend Line
+emaTrend = ta.ema(close, emaTrendLen)
+
+// B. Squeeze Logic (Bollinger Bands vs Keltner Channels)
+// If BB is inside Keltner, market is "Squeezing" (building energy).
+// We wait for it to Break OUT.
+[bbMid, bbUpper, bbLower] = ta.bb(close, bbLength, bbMult)
+[kcMid, kcUpper, kcLower] = ta.kc(close, bbLength, keltnerMult)
+
+// Squeeze Definitions
+isSqueeze     = (bbUpper < kcUpper) and (bbLower > kcLower) // Tight range
+squeezeFiring = (bbUpper > kcUpper) or (bbLower < kcLower)  // Explosion started
+
+// C. Momentum (Linear Regression) to confirm direction
+val = ta.linreg(close - math.avg(math.avg(ta.highest(high, 20), ta.lowest(low, 20)), ta.sma(close, 20)), 20, 0)
+momentumColor = val > 0 ? color.green : color.red
+
+// ==========================================
+// 3. SIGNAL TRIGGER
+// ==========================================
+// We only trade when the Squeeze BREAKS ("Firing")
+// AND Momentum agrees with the Trend.
+
+// Buy Logic:
+// 1. Squeeze Firing (Volatility expanding)
+// 2. Momentum is Green (Positive)
+// 3. Price is ABOVE 200 EMA (Trend is Up)
+// 4. Candle is Strong (Close near high)
+bullCandle = close > open and (close - open) > (high - close) // Strong body
+buySignal  = squeezeFiring and (val > 0) and (close > emaTrend) and bullCandle
+
+// Sell Logic:
+// 1. Squeeze Firing
+// 2. Momentum is Red (Negative)
+// 3. Price is BELOW 200 EMA (Trend is Down)
+// 4. Candle is Weak
+bearCandle = close < open and (open - close) > (close - low)
+sellSignal = squeezeFiring and (val < 0) and (close < emaTrend) and bearCandle
+
+// ==========================================
+// 4. EXECUTION & VISUALS
+// ==========================================
+// Single Shot Logic (Prevent Spam)
+var bool inTrade = false
+var string type  = "NONE"
+var float tp     = 0.0
+var float sl     = 0.0
+
+// Reset Trade
+if inTrade
+    if type == "LONG" and (high >= tp or low <= sl)
+        inTrade := false
+    if type == "SHORT" and (low <= tp or high >= sl)
+        inTrade := false
+
+// Trigger Execution (Only on confirmed close)
+validBuy  = buySignal and not inTrade and barstate.isconfirmed
+validSell = sellSignal and not inTrade and barstate.isconfirmed
+
+if validBuy
+    inTrade := true
+    type := "LONG"
+    tp := close + takeProfitPoints
+    sl := close - stopLossPoints
+    
+    // Draw Label & Lines
+    label.new(bar_index, low, "⚡ BTC BUY\nTP: " + str.tostring(tp, "#."), color=color.green, textcolor=color.white, style=label.style_label_up)
+    line.new(bar_index, tp, bar_index + 10, tp, color=color.green, width=2, style=line.style_dashed)
+    line.new(bar_index, sl, bar_index + 10, sl, color=color.red, width=2, style=line.style_dotted)
+    alert("BTC Buy Signal", alert.freq_once_per_bar_close)
+
+if validSell
+    inTrade := true
+    type := "SHORT"
+    tp := close - takeProfitPoints
+    sl := close + stopLossPoints
+    
+    // Draw Label & Lines
+    label.new(bar_index, high, "⚡ BTC SELL\nTP: " + str.tostring(tp, "#."), color=color.red, textcolor=color.white, style=label.style_label_down)
+    line.new(bar_index, tp, bar_index + 10, tp, color=color.red, width=2, style=line.style_dashed)
+    line.new(bar_index, sl, bar_index + 10, sl, color=color.green, width=2, style=line.style_dotted)
+    alert("BTC Sell Signal", alert.freq_once_per_bar_close)
+
+// ==========================================
+// 5. PLOTTING
+// ==========================================
+// Plot 200 EMA
+plot(emaTrend, color=color.white, linewidth=2, title="200 EMA Trend")
+
+// Background Squeeze Status
+// Black = Squeeze (Do Not Trade), Green/Red tint = Action Zone
+bgcolor(isSqueeze ? color.new(color.black, 90) : na, title="Squeeze Zone")
+
+// Plot Entry Arrows
+plotshape(validBuy, title="Buy Entry", location=location.belowbar, color=color.lime, style=shape.triangleup, size=size.small)
+plotshape(validSell, title="Sell Entry", location=location.abovebar, color=color.red, style=shape.triangledown, size=size.small)
